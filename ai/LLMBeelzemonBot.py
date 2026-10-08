@@ -89,10 +89,8 @@ class LLMBeelzemonBot(BeelzemonXBot):
             played = await self.play_card(
                 ws, "Hand", hand_index, candidate["cost"]
             )
-            card_obj = self.card_factory.get_card(
-                played["uniqueCardNumber"], card_id=played["id"]
-            )
-            await card_obj.on_play_effect(ws)
+            # BeelzemonXBot.play_card() already resolves On Play effects.
+            # Do not invoke them a second time here.
             return True
 
         if kind == "setup":
@@ -111,6 +109,26 @@ class LLMBeelzemonBot(BeelzemonXBot):
                 return
 
             candidates = build_candidates(self)
+            # For the first playable version, only expose evolution choices that
+            # the existing Beelzemon-specific code explicitly validates.
+            safe_candidates = []
+            for candidate in candidates:
+                if candidate["kind"] != "digivolve":
+                    safe_candidates.append(candidate)
+                    continue
+                card_id = candidate.get("card_id")
+                card = next(
+                    (
+                        card
+                        for card in self.game.get("player2Hand", [])
+                        if card.get("id") == card_id
+                    ),
+                    None,
+                )
+                if card and card.get("uniqueCardNumber") in {"BT12-073", "BT12-085"}:
+                    safe_candidates.append(candidate)
+
+            candidates = safe_candidates
             if not candidates:
                 return
 

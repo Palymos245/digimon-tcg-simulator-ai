@@ -1,105 +1,134 @@
 import logging
 
 from BeelzemonXBot import BeelzemonXBot
+from llm.action_catalog import build_candidates
 from llm.openai_responses import OpenAIResponsesDecisionProvider
 from llm.state_view import build_decision_view
 
 
 class LLMBeelzemonBot(BeelzemonXBot):
-    """Beelzemon bot with an LLM choosing between deterministic strategy routines."""
-
-    STRATEGY_DESCRIPTIONS = {
-        "avoid_brick": "Use a setup/resource routine that may play Ai & Mako, use Purple Memory Boost, or resolve a Rivals' Barrage delay.",
-        "digivolve": "Use the existing deterministic digivolution strategy for a Battle Area Digimon.",
-        "attack": "Use the existing deterministic attack strategy, including simulator-enforced attack/effect resolution.",
-        "digivolve_in_breed": "Use the existing deterministic strategy to digivolve in the Breeding Area.",
-        "play_digimon": "Use the existing deterministic strategy to play a Digimon from hand.",
-        "pass": "Take no further Main Phase action and end the turn.",
-    }
+    """Beelzemon bot with an LLM choosing concrete legal strategic actions."""
 
     def __init__(self, username: str):
         super().__init__(username)
         self.decision_provider = OpenAIResponsesDecisionProvider()
         self.llm_log = logging.getLogger("LLMBeelzemonBot")
 
-    def _candidates(self) -> list[dict[str, str]]:
-        return [
-            {"action": action, "description": description}
-            for action, description in self.STRATEGY_DESCRIPTIONS.items()
-        ]
-
-    async def _choose(self, failed_actions: set[str]) -> str:
-        candidates = [
-            c for c in self._candidates()
-            if c["action"] not in failed_actions
-        ]
-        if not candidates:
-            return "pass"
-
+    async def _choose(self, candidates):
         try:
             state_view = build_decision_view(self)
             action = await self.decision_provider.choose_action(
                 state_view, candidates
             )
-            candidate_names = {c["action"] for c in candidates}
-            if action in candidate_names:
-                self.llm_log.info("LLM selected strategy: %s", action)
+            valid = {candidate["action"] for candidate in candidates}
+            if action in valid:
+                self.llm_log.info("LLM selected action: %s", action)
                 return action
             self.llm_log.warning(
-                "LLM selected invalid candidate %r; falling back.", action
+                "LLM returned action not in candidate set: %r", action
             )
         except Exception as exc:
             self.llm_log.exception("LLM decision failed: %s", exc)
 
-        fallback_order = [
-            "avoid_brick",
-            "digivolve",
-            "attack",
-            "digivolve_in_breed",
-            "play_digimon",
-            "pass",
-        ]
-        candidate_names = {c["action"] for c in candidates}
-        for action in fallback_order:
-            if action not in failed_actions and action in candidate_names:
-                self.llm_log.info(
-                    "Using deterministic fallback strategy: %s", action
-                )
-                return action
+        # Safe fallback: use the existing deterministic strategy, never arbitrary
+        # state mutation.
         return "pass"
 
+    async def _execute(self, ws, candidate):
+        action = candidate["action"]
+        kind = candidate["kind"]
+
+        if kind == "pass":
+            return False
+
+        if kind == "attack":
+            position = candidate["battle_position"]
+            await self.suspend_card(ws, position)
+            await self.when_attacking_effects_strategy(ws, position)
+            await self.attack_with_digimon(ws, position)
+            return True
+
+        if kind == "digivolve":
+            position = candidate["battle_position"]
+            hand_index = candidate["hand_index"]
+            card = self.game["player2Hand"][hand_index]
+            digivolution_card_obj = self.card_factory.get_card(
+                card["uniqueCardNumber"],
+                digimon_index=position,
+                card_id=card["id"],
+            )
+            await self.digivolve(
+                ws,
+                "Digi",
+                position,
+                "Hand",
+                hand_index,
+                candidate["cost"],
+            )
+            await digivolution_card_obj.when_digivolving_effect(ws)
+            if card["uniqueCardNumber"] == "BT12-085":
+                await self.use_seventh_full_cluster_trash_if_possible(ws)
+            return True
+
+        if kind == "breed_digivolve":
+            hand_index = candidate["hand_index"]
+            card = self.game["player2Hand"][hand_index]
+            await self.digivolve(
+                ws,
+                "BreedingArea",
+                0,
+                "Hand",
+                hand_index,
+                candidate["cost"],
+            )
+            return True
+
+        if kind == "play":
+            hand_index = candidate["hand_index"]
+            card = self.game["player2Hand"][hand_index]
+            played = await self.play_card(
+                ws, "Hand", hand_index, candidate["cost"]
+            )
+            card_obj = self.card_factory.get_card(
+                played["uniqueCardNumber"], card_id=played["id"]
+            )
+            await card_obj.on_play_effect(ws)
+            return True
+
+        if kind == "setup":
+            return bool(await self.avoid_brick(ws))
+
+        raise ValueError(f"Unknown candidate kind: {kind}")
+
     async def main_phase_strategy(self, ws):
-        # Existing simulator setup stays deterministic.
+        # Preserve deterministic rookie preparation because this routine is a
+        # safe mechanical setup step, not an LLM judgment.
         await self.prepare_rookies(ws)
 
-        failed_actions: set[str] = set()
         max_decisions = 20
-
         for _ in range(max_decisions):
             if self.game["memory"] < 0:
                 return
 
-            action = await self._choose(failed_actions)
-            if action == "pass":
+            candidates = build_candidates(self)
+            if not candidates:
                 return
 
-            if action == "avoid_brick":
-                did_action = await self.avoid_brick(ws)
-            elif action == "digivolve":
-                did_action = await self.digivolve_strategy(ws)
-            elif action == "attack":
-                did_action = await self.attack_loop(ws)
-            elif action == "digivolve_in_breed":
-                did_action = await self.digivolve_in_breed_strategy(ws)
-            elif action == "play_digimon":
-                did_action = await self.play_digimon_strategy(ws)
-            else:
+            action = await self._choose(candidates)
+            candidate = next(
+                candidate for candidate in candidates
+                if candidate["action"] == action
+            )
+            if candidate["kind"] == "pass":
                 return
 
-            if did_action:
-                failed_actions.clear()
-            else:
-                failed_actions.add(action)
+            try:
+                await self._execute(ws, candidate)
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                # State changed while waiting for the response/opponent. Rebuild
+                # candidates from the authoritative simulator state.
+                self.llm_log.warning("Rejected stale action %s: %s", action, exc)
+                continue
 
         self.llm_log.warning(
             "Reached main-phase decision cap; ending Main Phase safely."

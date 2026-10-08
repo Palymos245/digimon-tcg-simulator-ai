@@ -16,8 +16,10 @@ def main() -> None:
         if not login_response:
             raise RuntimeError("Login failed after registration!")
 
-    if not bot.set_avatar(config("BOT_AVATAR")):
-        raise SystemExit(1)
+    avatar = config("BOT_AVATAR", default=None)
+    if avatar is not None and avatar != "":
+        if not bot.set_avatar(avatar):
+            raise SystemExit(1)
 
     imported_decks = bot.list_imported_decks()
     if not imported_decks:

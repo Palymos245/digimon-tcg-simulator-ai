@@ -1,0 +1,29 @@
+name: Validate AI layer
+
+on:
+  push:
+    paths:
+      - "ai/**"
+      - ".github/workflows/ai-python.yml"
+  pull_request:
+    paths:
+      - "ai/**"
+      - ".github/workflows/ai-python.yml"
+
+jobs:
+  python-ai:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        run: python -m compileall -q ai
+
+      - name: Run LLM state-view tests
+        working-directory: ai
+        run: python -m unittest llm.test_state_view

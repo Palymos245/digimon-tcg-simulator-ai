@@ -7,9 +7,9 @@ The original BeelzemonXBot is a deterministic strategy bot. The new LLMBeelzemon
 - Simulator/bot code owns memory, zones, phases, suspension, attacks, evolution, security, and card effects.
 - The LLM chooses only one of the exposed strategic routines.
 - The state view gives the LLM the bot's private hand plus public opponent information. Opponent hand/deck contents are intentionally not exposed.
-- If an LLM call fails or returns an invalid choice, the bot falls back to the existing deterministic strategy order.
+- If an LLM call fails or returns an invalid choice, the bot safely ends the Main Phase without arbitrary state mutation.
 
-This is deliberately a first Level-2 integration. It is not yet a fully granular legal-action generator; later iterations can expose individual legal choices instead of the current strategy routines.
+It is a first Level-2 integration. The current candidate catalog exposes concrete attacks, selected evolution lines, Breeding Area evolutions, Digimon plays, and a safe setup choice. The deterministic simulator remains the authority for execution and state changes.
 
 ## Running the LLM bot
 
